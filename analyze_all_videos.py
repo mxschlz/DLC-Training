@@ -1,49 +1,82 @@
 import os
-os.environ["QT_API"] = "pyqt5"
-import deeplabcut
+import multiprocessing
 from pathlib import Path
-from deeplabcut.utils import auxiliaryfunctions
-import matplotlib
-matplotlib.use("Agg") # Safe for server (headless)
+
+# Force CPU inference - the GT 710 GPU is extremely slow and will bottleneck or OOM.
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["QT_API"] = "pyqt5"
 
 # --- CONFIGURATION ---
 config_path = "/home/maxschulz/IPSY1-Storage/Projects/ac/Transfer/Max2Max/ocapi-Max-2026-02-13/config.yaml"
-video_source = r"/home/maxschulz/IPSY1-Storage/Projects/ac/Experiments/running_studies/OCAPI/all_videos_combined"
+video_source = r"/home/maxschulz/IPSY1-Storage/Projects/ac/Experiments/running_studies/OCAPI/SMILE/Videos"
 
-# Set this to the iteration number of your ResNet50 model.
-# Check your 'dlc-models' folder to be sure (e.g., iteration-0 is usually the first one).
 TARGET_ITERATION = 0 
 
-# --- 1. Setup & Portability Fixes ---
-# Ensure the project path in config.yaml matches the current machine
-cfg = auxiliaryfunctions.read_config(config_path)
-current_project_path = str(Path(config_path).parents[0])
-if cfg['project_path'] != current_project_path:
-    print(f"Updating project_path in config to: {current_project_path}")
-    cfg['project_path'] = current_project_path
-    auxiliaryfunctions.write_config(config_path, cfg)
+def setup_config():
+    import deeplabcut
+    from deeplabcut.utils import auxiliaryfunctions
+    cfg = auxiliaryfunctions.read_config(config_path)
+    current_project_path = str(Path(config_path).parents[0])
+    if cfg['project_path'] != current_project_path:
+        print(f"Updating project_path in config to: {current_project_path}")
+        cfg['project_path'] = current_project_path
+        auxiliaryfunctions.write_config(config_path, cfg)
 
-print(f"Current config iteration: {cfg['iteration']}")
+    print(f"Current config iteration: {cfg['iteration']}")
 
-if cfg['iteration'] != TARGET_ITERATION:
-    print(f"Switching configuration to use Iteration {TARGET_ITERATION} (ResNet50)...")
-    cfg['iteration'] = TARGET_ITERATION
-    auxiliaryfunctions.write_config(config_path, cfg)
-else:
-    print(f"Configuration is already set to Iteration {TARGET_ITERATION}.")
+    if cfg['iteration'] != TARGET_ITERATION:
+        print(f"Switching configuration to use Iteration {TARGET_ITERATION}...")
+        cfg['iteration'] = TARGET_ITERATION
+        auxiliaryfunctions.write_config(config_path, cfg)
+    else:
+        print(f"Configuration is already set to Iteration {TARGET_ITERATION}.")
 
-# --- 2. Get All Videos ---
-video_paths = [str(p) for p in Path(video_source).glob('*') if p.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']]
-print(f"Found {len(video_paths)} videos to analyze.")
+def process_video(video_path):
+    # Import inside the worker process to avoid TF fork deadlocks
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+    os.environ["QT_API"] = "pyqt5"
+    # Limit OpenMP threads to avoid oversubscription
+    os.environ["OMP_NUM_THREADS"] = "4"
+    os.environ["TF_NUM_INTRAOP_THREADS"] = "4"
+    os.environ["TF_NUM_INTEROP_THREADS"] = "1"
+    
+    import deeplabcut
+    import matplotlib
+    matplotlib.use("Agg")
+    
+    # Configure TensorFlow threads explicitly
+    import tensorflow as tf
+    tf.config.threading.set_intra_op_parallelism_threads(4)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+    
+    print(f"--- Starting analysis for: {video_path} ---")
+    try:
+        deeplabcut.analyze_videos(config_path, [video_path], save_as_csv=True, TFGPUinference=False)
+        deeplabcut.filterpredictions(config_path, [video_path])
+        deeplabcut.create_labeled_video(config_path, [video_path], draw_skeleton=True, filtered=True)
+        print(f"--- Completed: {video_path} ---")
+    except Exception as e:
+        print(f"--- Error processing {video_path}: {e} ---")
 
-# --- 3. Run Analysis Pipeline ---
-# Analyze (generates .h5 and .csv files)
-# Optimization: Set batch_size=32 (or 16 if OOM errors occur) to maximize GPU utilization
-deeplabcut.analyze_videos(config_path, video_paths, save_as_csv=True, batchsize=32, TFGPUinference=True, allow_growth=True)
-
-# Filter (smooths out jitter)
-deeplabcut.filterpredictions(config_path, video_paths)
-
-# Create Video (overlays dots on the video)
-# We use filtered=True to visualize the smoothed data
-deeplabcut.create_labeled_video(config_path, video_paths, draw_skeleton=True, filtered=True)
+if __name__ == '__main__':
+    # Use spawn to prevent TF/CUDA fork deadlocks
+    try:
+        multiprocessing.set_start_method('spawn')
+    except RuntimeError:
+        pass
+        
+    setup_config()
+    
+    video_paths = [str(p) for p in Path(video_source).rglob('*') if p.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']]
+    print(f"Found {len(video_paths)} videos to analyze.")
+    
+    # We have 48 CPU cores and ~188GB RAM. 
+    # 12 workers will process 12 videos concurrently, maxing out CPU without overloading RAM.
+    NUM_WORKERS = 12 
+    print(f"Starting parallel processing with {NUM_WORKERS} workers...")
+    
+    with multiprocessing.Pool(processes=NUM_WORKERS) as pool:
+        pool.map(process_video, video_paths)
+        
+    print("All videos processed!")
