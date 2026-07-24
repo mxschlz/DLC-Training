@@ -8,8 +8,9 @@
 #SBATCH --time=48:00:00                
 
 # 1. Activate your DeepLabCut environment
-# (You may need to uncomment and adjust the line below depending on how conda is loaded on the cluster)
-# source activate dlc 
+# Slurm jobs are non-interactive, so we must explicitly source conda first
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate dlc
 
 # 2. Run the cluster-optimized python script
 python analyze_all_videos_cluster.py
