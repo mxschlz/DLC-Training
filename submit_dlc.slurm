@@ -13,4 +13,4 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate dlc
 
 # 2. Run the cluster-optimized python script
-python storage/personal/Projects/DLC-Training/analyze_all_videos_cluster.py
+python analyze_all_videos_cluster.py
