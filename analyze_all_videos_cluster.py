@@ -37,9 +37,26 @@ def setup_config():
 if __name__ == '__main__':
     setup_config()
     
-    # 1. Get All Videos
     video_paths = [str(p) for p in Path(video_source).rglob('*') if p.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']]
     print(f"Found {len(video_paths)} videos to analyze.")
+    
+    # Filter out already analyzed videos
+    unprocessed_videos = []
+    for vid_path in video_paths:
+        vid_dir = Path(vid_path).parent
+        vid_name = Path(vid_path).stem
+        # Check if an .h5 file containing the video name exists in the same directory
+        h5_files = list(vid_dir.glob(f"{vid_name}*.h5"))
+        if not h5_files:
+            unprocessed_videos.append(vid_path)
+            
+    print(f"Skipping {len(video_paths) - len(unprocessed_videos)} already analyzed videos.")
+    print(f"Remaining videos to analyze: {len(unprocessed_videos)}")
+    
+    if len(unprocessed_videos) == 0:
+        print("All videos are already analyzed!")
+        exit(0)
+
     
     # 2. Run Analysis Pipeline (GPU Accelerated)
     # We pass the entire list to analyze_videos. DeepLabCut will use the powerful 
@@ -48,7 +65,7 @@ if __name__ == '__main__':
     
     deeplabcut.analyze_videos(
         config_path, 
-        video_paths, 
+        unprocessed_videos, 
         save_as_csv=True, 
         batchsize=32,          # High batch size for GPU efficiency
         TFGPUinference=True,   # Ensure GPU is used
@@ -56,9 +73,9 @@ if __name__ == '__main__':
     )
     
     print("Filtering predictions...")
-    deeplabcut.filterpredictions(config_path, video_paths)
+    deeplabcut.filterpredictions(config_path, unprocessed_videos)
     
     print("Creating labeled videos...")
-    deeplabcut.create_labeled_video(config_path, video_paths, draw_skeleton=True, filtered=True)
+    deeplabcut.create_labeled_video(config_path, unprocessed_videos, draw_skeleton=True, filtered=True)
     
     print("All videos processed on cluster!")
